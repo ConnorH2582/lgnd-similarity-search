@@ -1,0 +1,1 @@
+"""Package for the LGND take-home MCP-style backend server."""
