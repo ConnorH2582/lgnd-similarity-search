@@ -1,106 +1,119 @@
 import { useState } from "react";
+import axios from "axios";
 import "./App.css";
 
 /**
- * App component for LGND similarity search demo.
+ * LGND Similarity Search Frontend
  *
- * Provides:
- * - Search bar for text queries (e.g. "airport", "marina")
- * - Calls MCP backend for similarity search
- * - Renders thumbnail results
- * - Lightweight console logging for debugging/demo purposes
+ * - Matches original UI/UX (alignment, disabled button, grid layout)
+ * - Adds lightweight frontend logging
+ * - Safely handles backend response shape
+ * - Prevents .map errors
  */
 export default function App() {
   const [query, setQuery] = useState("");
-  const [results, setResults] = useState([]);
+  const [result, setResult] = useState(null);   // matches original shape
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
-  /**
-   * Perform text-based similarity search via MCP backend.
-   */
-  const handleSearch = async () => {
+  async function handleSearch(e) {
+    if (e?.preventDefault) e.preventDefault();
     if (!query.trim()) return;
 
     console.log("[Frontend] Searching for:", query);
+
     setLoading(true);
     setError("");
-    setResults([]);
+    setResult(null);
 
     try {
-      const resp = await fetch(
-        `http://127.0.0.1:8000/similarity/text?q=${encodeURIComponent(query)}`
-      );
+      const res = await axios.get("http://127.0.0.1:8000/similarity/text", {
+        params: { q: query },
+      });
 
-      if (!resp.ok) {
-        throw new Error(`Server responded with ${resp.status}`);
-      }
+      console.log("[Frontend] Raw backend response:", res.data);
 
-      const data = await resp.json();
-      console.log("[Frontend] Results received:", data);
+      // SAFETY: ensure results array always exists
+      const safe = {
+        ...res.data,
+        results: Array.isArray(res.data.results) ? res.data.results : [],
+      };
 
-      setResults(data);
+      setResult(safe);
+      console.log("[Frontend] Parsed results:", safe);
     } catch (err) {
       console.error("[Frontend] Search error:", err);
-      setError("Error during search. Check console for details.");
+      setError("Something went wrong contacting the backend.");
     } finally {
       setLoading(false);
     }
-  };
-
-  /**
-   * Render a single result card, including thumbnail image.
-   */
-  const renderResult = (chip) => {
-    const thumbURL = `https://lgnd-fullstack-takehome-thumbnails.s3.us-east-2.amazonaws.com/${chip.chips_id}_256.jpeg`;
-
-    return (
-      <div key={chip.chips_id} className="result-card">
-        <img
-          src={thumbURL}
-          alt="chip thumbnail"
-          className="result-image"
-          onLoad={() =>
-            console.log(`[Frontend] Thumbnail loaded for ${chip.chips_id}`)
-          }
-          onError={() =>
-            console.error(`[Frontend] Failed to load thumbnail: ${thumbURL}`)
-          }
-        />
-
-        <div className="result-meta">
-          <p><strong>Chip ID:</strong> {chip.chips_id}</p>
-          <p><strong>Similarity:</strong> {chip.similarity.toFixed(4)}</p>
-          <p>
-            <strong>Location:</strong> {chip.lat.toFixed(4)},{" "}
-            {chip.lon.toFixed(4)}
-          </p>
-        </div>
-      </div>
-    );
-  };
+  }
 
   return (
-    <div className="app-container">
-      <h1>LGND Similarity Search</h1>
+    <div style={{ maxWidth: 800, margin: "0 auto", padding: 24 }}>
+      <h1>LGND SF Imagery Search</h1>
 
-      <div className="search-container">
+      {/* Original layout restored */}
+      <form onSubmit={handleSearch} style={{ marginBottom: 16 }}>
         <input
-          type="text"
-          placeholder="Search for 'airport', 'marina', etc."
+          style={{ width: "70%", padding: 8, marginRight: 8 }}
+          placeholder='Try "coastal marina" or "airport"'
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && handleSearch()}
+          disabled={loading}
         />
-        <button onClick={handleSearch}>Search</button>
-      </div>
+        <button type="submit" disabled={loading}>
+          {loading ? "Searching..." : "Search"}
+        </button>
+      </form>
 
-      {loading && <p className="loading">Loading...</p>}
-      {error && <p className="error">{error}</p>}
+      {error && <p style={{ color: "red" }}>{error}</p>}
 
-      <div className="results-grid">
-        {results.map((chip) => renderResult(chip))}
-      </div>
+      {/* Render results in original grid */}
+      {result && result.results && (
+        <div>
+          <h2>Results</h2>
+
+          {result.poi && (
+            <p>
+              OSM anchor: <strong>{result.poi.name}</strong>
+            </p>
+          )}
+
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "repeat(auto-fit, 150px)",
+              gap: 12,
+            }}
+          >
+            {result.results.map((chip) => (
+              <div key={chip.chips_id} style={{ fontSize: 12 }}>
+                <img
+                  src={`https://lgnd-fullstack-takehome-thumbnails.s3.us-east-2.amazonaws.com/${chip.chips_id}_256.jpeg`}
+                  alt={chip.chips_id}
+                  style={{
+                    width: "100%",
+                    height: 100,
+                    objectFit: "cover",
+                    borderRadius: 4,
+                  }}
+                  onLoad={() =>
+                    console.log(`[Frontend] Loaded thumbnail for ${chip.chips_id}`)
+                  }
+                  onError={() =>
+                    console.error(
+                      `[Frontend] Failed to load thumbnail for ${chip.chips_id}`
+                    )
+                  }
+                />
+
+                <div>sim: {chip.similarity.toFixed(3)}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

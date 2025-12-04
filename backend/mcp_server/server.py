@@ -1,71 +1,93 @@
-"""FastAPI MCP server for LGND take-home.
+"""FastAPI application exposing similarity search endpoints."""
 
-Exposes:
-- /similarity/text
-- /similarity/point
-
-Includes startup logging.
-"""
-
-from fastapi import FastAPI, Query
-from fastapi.middleware.cors import CORSMiddleware
-from .duckdb_client import DuckDBClient
-from .handlers import Handlers
 import logging
+from fastapi import FastAPI, Query, Request
+from fastapi.middleware.cors import CORSMiddleware
+
+from .handlers import MCPHandlers
 
 logger = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO)
 
 
-app = FastAPI(title="LGND MCP Server")
+app = FastAPI(
+    title="LGND Similarity Search Server",
+    description="MVP backend for similarity search over SF imagery using DuckDB and OSM.",
+)
 
-# Enable CORS
+# Instantiate application handlers once at startup.
+handlers = MCPHandlers(db_path="./embeddings.db")
+
+
+# ----------------------------------------------------------------------
+# CORS (unchanged)
+# ----------------------------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Initialize DB + handlers
-db = DuckDBClient()
-handlers = Handlers(db)
 
-
+# ----------------------------------------------------------------------
+# Startup Event
+# ----------------------------------------------------------------------
 @app.on_event("startup")
 async def startup_event():
-    """Log server startup."""
-    logger.info("[Server] MCP server initialized and ready.")
+    """Log startup information."""
+    logger.info("[Server] LGND Similarity Search Server is starting up...")
+    logger.info("[Server] Handlers + DuckDB client initialized successfully.")
 
 
 # ----------------------------------------------------------------------
-# API Endpoints
+# Health Endpoint
 # ----------------------------------------------------------------------
-@app.get("/similarity/text")
-async def similarity_text(q: str = Query(..., description="Text query")):
-    """Similarity search via text → OSM → spatial lookup → vector search.
-
-    Args:
-        q (str): Query text.
+@app.get("/health")
+async def health() -> dict:
+    """Return a simple health check response.
 
     Returns:
-        List[Dict[str, Any]]: Similar chips.
+        A dictionary indicating that the server is healthy.
     """
+    logger.debug("[Server] Health check requested.")
+    return {"ok": True}
+
+
+# ----------------------------------------------------------------------
+# Similarity Endpoints
+# ----------------------------------------------------------------------
+@app.get("/similarity/text")
+async def similarity_text(
+    request: Request,
+    q: str = Query(..., description="Natural-language query, e.g. 'coastal marina'."),
+) -> dict:
+    """Run a similarity search based on a text query.
+
+    Args:
+        q: Natural-language query describing the target area or feature.
+
+    Returns:
+        A JSON-serializable dictionary containing similarity search results.
+    """
+    logger.info(f"[Server] /similarity/text → query='{q}'")
     return await handlers.similarity_by_text(q)
 
 
 @app.get("/similarity/point")
 async def similarity_point(
-    lon: float = Query(..., description="Longitude"),
-    lat: float = Query(..., description="Latitude"),
-):
-    """Similarity search via direct point location.
+    request: Request,
+    lon: float = Query(..., description="Longitude in WGS84."),
+    lat: float = Query(..., description="Latitude in WGS84."),
+) -> dict:
+    """Run a similarity search anchored at a longitude/latitude point.
 
     Args:
-        lon (float): Query longitude.
-        lat (float): Query latitude.
+        lon: Longitude in WGS84.
+        lat: Latitude in WGS84.
 
     Returns:
-        List[Dict[str, Any]]: Similar chips.
+        A JSON-serializable dictionary containing similarity search results.
     """
+    logger.info(f"[Server] /similarity/point → lon={lon}, lat={lat}")
     return await handlers.similarity_by_point(lon, lat)

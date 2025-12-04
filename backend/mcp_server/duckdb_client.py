@@ -5,7 +5,7 @@ Handles:
 - Vector similarity search: cosine similarity against 1024-dim embedding vectors
 - Metadata lookup: chip centroid for display
 
-Includes lightweight performance logging.
+All queries are logged with timing instrumentation for performance analysis.
 """
 
 from typing import List, Dict, Any, Optional
@@ -13,7 +13,6 @@ import duckdb
 import numpy as np
 import logging
 import time
-import os
 
 logger = logging.getLogger(__name__)
 
@@ -22,63 +21,64 @@ class DuckDBClient:
     """Client for interacting with the `embeddings` DuckDB database."""
 
     def __init__(self, db_path: str = None) -> None:
-        """Initialize DuckDB client and load spatial extension.
-
-        Args:
-            db_path (str, optional): Optional path to the DuckDB file.
-                If None, resolves the root-level embeddings.db automatically.
         """
-        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+        Create a DuckDB connection and load spatial extension.
+        If db_path is not provided, it resolves the correct absolute
+        path to the project's root-level embeddings.db file.
+        """
 
+        import os
+
+        # Determine project root (two levels above this file)
+        project_root = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..")
+        )
+
+        # If user didn’t supply a db_path, use the root-level embeddings.db
         if db_path is None:
             db_path = os.path.join(project_root, "embeddings.db")
 
         self.db_path = db_path
+
         logger.info(f"[DuckDBClient] Connecting to DuckDB at {db_path}")
+        print(">>> ABSOLUTE DB PATH:", db_path)
+        print(">>> EXISTS:", os.path.exists(db_path))
 
-        # Connect to DuckDB
+        # Connect
+        t0 = time.perf_counter()
         self.con = duckdb.connect(db_path)
-
-        # Validate table existence
-        tables = self.con.execute("SHOW TABLES").fetchall()
-        logger.info(f"[DuckDBClient] Database tables: {tables}")
-
-        if ('embeddings',) not in tables:
-            logger.error(
-                "[DuckDBClient] ERROR: Database is missing 'embeddings' table. "
-                f"DB path: {db_path}"
-            )
+        logger.info(
+            f"[DuckDBClient] DuckDB connection established in "
+            f"{time.perf_counter() - t0:.3f}s"
+        )
 
         self._load_extensions()
 
     def _load_extensions(self) -> None:
-        """Install and load DuckDB spatial extension."""
+        """Install and load DuckDB spatial extension if needed."""
         try:
-            logger.info("[DuckDBClient] Installing spatial extension…")
+            logger.info("[DuckDBClient] Installing spatial extension...")
             self.con.execute("INSTALL spatial;")
         except Exception:
             logger.info("[DuckDBClient] Spatial extension already installed.")
 
         self.con.execute("LOAD spatial;")
-        logger.info("[DuckDBClient] Spatial extension loaded successfully.")
+        logger.info("[DuckDBClient] Spatial extension loaded.")
 
-    # ----------------------------------------------------------------------
-    # Spatial Lookup
-    # ----------------------------------------------------------------------
     def get_chip_by_point(self, lon: float, lat: float) -> Optional[Dict[str, Any]]:
         """Return chip metadata for the tile containing (lon, lat).
 
         Args:
-            lon (float): Longitude.
-            lat (float): Latitude.
+            lon (float): Longitude
+            lat (float): Latitude
 
         Returns:
-            Optional[Dict[str, Any]]: Dict containing:
+            Optional[Dict[str, Any]]: containing:
                 - chips_id (str)
-                - vec (List[float]): 1024-dim embedding vector
-            Returns None if no geometry contains the point.
+                - vec (List[float]): 1024-dim embedding
+            or None if the point is not inside any geom polygon.
         """
-        logger.info(f"[DuckDBClient] Spatial query at lon={lon}, lat={lat}")
+        logger.info(f"[DuckDBClient] Spatial query for lon={lon}, lat={lat}")
         t0 = time.perf_counter()
 
         query = """
@@ -93,37 +93,42 @@ class DuckDBClient:
 
         if not row:
             logger.warning(
-                f"[DuckDBClient] No chip found for point ({lon}, {lat}) "
-                f"(elapsed={dt:.3f}s)"
+                f"[DuckDBClient] No chip found at lon={lon}, lat={lat} (elapsed={dt:.3f}s)"
             )
             return None
 
         chips_id, vec = row
         logger.info(
-            f"[DuckDBClient] Spatial lookup matched chip={chips_id} "
+            f"[DuckDBClient] Found chip '{chips_id}' via spatial lookup "
             f"(elapsed={dt:.3f}s)"
         )
-
         return {"chips_id": chips_id, "vec": vec}
 
-    # ----------------------------------------------------------------------
-    # Similarity Search
-    # ----------------------------------------------------------------------
     def get_similar_chips(
         self, seed_vec: List[float], limit: int = 12
     ) -> List[Dict[str, Any]]:
-        """Run cosine similarity search against embedding vectors.
+        """Perform cosine similarity search.
+
+        Steps:
+            1. Normalize the seed vector (FLOAT32)
+            2. Use array_cosine_similarity over the whole embeddings table
+            3. Retrieve centroid coordinates for each chip
 
         Args:
-            seed_vec (List[float]): Normalized 1024-dim vector.
+            seed_vec (List[float]): 1024-dim embedding vector.
             limit (int): Number of results to return.
 
         Returns:
-            List[Dict[str, Any]]: Chips sorted by similarity descending.
+            List[Dict[str, Any]]: list of match dicts with:
+                - chips_id
+                - similarity
+                - lon, lat (centroid)
         """
-        logger.info(f"[DuckDBClient] Starting similarity search (top={limit})")
+        logger.info(f"[DuckDBClient] Running similarity search (top {limit})")
+
         t0 = time.perf_counter()
 
+        # Cast vector to float32 and normalize
         seed_vec = np.array(seed_vec, dtype=np.float32)
         if seed_vec.shape[0] != 1024:
             raise ValueError(
@@ -151,7 +156,7 @@ class DuckDBClient:
         dt = time.perf_counter() - t0
 
         logger.info(
-            f"[DuckDBClient] Similarity search returned {len(rows)} results "
+            f"[DuckDBClient] Similarity query returned {len(rows)} rows "
             f"(elapsed={dt:.3f}s)"
         )
 
@@ -172,14 +177,21 @@ class DuckDBClient:
     # Metadata
     # ----------------------------------------------------------------------
     def get_chip_metadata(self, chips_id: str) -> Optional[Dict[str, Any]]:
-        """Fetch centroid metadata for a specific chip.
+        """Fetch centroid metadata for a chip.
 
         Args:
-            chips_id (str): Chip identifier.
+            chips_id (str): Embedding chip identifier.
 
         Returns:
-            Optional[Dict[str, Any]]: Dict with chip metadata, or None.
+            Optional[Dict[str, Any]]: A dictionary with:
+                - "chips_id" (str)
+                - "lon" (float)
+                - "lat" (float)
+            Returns None if no chip exists with that ID.
         """
+        logger.info(f"[DuckDBClient] Fetching metadata for chip {chips_id}")
+
+        t0 = time.perf_counter()
         query = """
             SELECT chips_id,
                    ST_X(ST_Centroid(geom)) AS lon,
@@ -190,9 +202,20 @@ class DuckDBClient:
         """
 
         row = self.con.execute(query, [chips_id]).fetchone()
+        dt = time.perf_counter() - t0
+
         if not row:
-            logger.warning(f"[DuckDBClient] Metadata not found for chip={chips_id}")
+            logger.warning(
+                f"[DuckDBClient] No metadata found for chip {chips_id} "
+                f"(elapsed={dt:.3f}s)"
+            )
             return None
 
         chips_id, lon, lat = row
+
+        logger.info(
+            f"[DuckDBClient] Metadata lookup succeeded for chip {chips_id} "
+            f"(elapsed={dt:.3f}s)"
+        )
+
         return {"chips_id": chips_id, "lon": lon, "lat": lat}

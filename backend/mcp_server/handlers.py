@@ -1,130 +1,193 @@
-"""Handlers for MCP server endpoints.
+"""Application-level handlers that coordinate OSM geocoding and DuckDB similarity search.
 
-Provides:
-- similarity_by_text()
-- similarity_by_point()
+This module defines the MCPHandlers class, which exposes high-level workflows:
 
-Adds lightweight logging of request flow and processing time.
+1. similarity_by_text()  — user provides a natural-language query
+    → OSM geocoder resolves coordinates
+    → find chip containing that point
+    → vector similarity search
+    → return matching imagery tiles
+
+2. similarity_by_point() — user provides explicit lon/lat
+    → find chip containing that point
+    → similarity search
+    → return matches
+
+Timing logs help diagnose where the pipeline is slow (OSM vs DuckDB).
 """
 
-from typing import Dict, Any, List
-import logging
 import time
+import logging
+from typing import Any, Dict
+
+from .duckdb_client import DuckDBClient
+from .osm_client import OsmClient
 
 logger = logging.getLogger(__name__)
 
+THUMB_BASE = "https://lgnd-fullstack-takehome-thumbnails.s3.us-east-2.amazonaws.com"
 
-class Handlers:
-    """Encapsulates business logic for similarity search and spatial lookup."""
 
-    def __init__(self, db_client):
-        """Initialize handler with a DuckDB client.
+class MCPHandlers:
+    """Coordinator for OSM-based geocoding and DuckDB similarity search.
+
+    Acts as the glue between external services (OSM), the embeddings database
+    (DuckDB), and the FastAPI routes that surface the results.
+    """
+
+    def __init__(self, db_path: str) -> None:
+        """Initialize handler dependencies.
 
         Args:
-            db_client: Instance of DuckDBClient.
+            db_path (str): Path to the DuckDB `embeddings.db` file.
         """
-        self.db = db_client
+        logger.info(f"[MCPHandlers] Initializing with DB at: {db_path}")
+        self.db = DuckDBClient(db_path)
+        self.osm = OsmClient()
+        logger.info("[MCPHandlers] Initialization complete.")
 
-    # ------------------------------------------------------------------
-    # Text Query Similarity
-    # ------------------------------------------------------------------
-    async def similarity_by_text(self, text: str) -> List[Dict[str, Any]]:
-        """Run similarity search by using OSM to resolve text to a location.
+    # ----------------------------------------------------------------------
+    # Similarity by POINT
+    # ----------------------------------------------------------------------
+    async def similarity_by_point(self, lon: float, lat: float) -> Dict[str, Any]:
+        """Run a similarity search anchored at a specific geographic point.
+
+        Steps:
+            1. Find the embedding chip whose polygon contains (lon, lat)
+            2. Extract its vector
+            3. Run cosine similarity search across all 567k chips
+            4. Return the top-N similar results
 
         Args:
-            text (str): User text query.
+            lon (float): Longitude in WGS84.
+            lat (float): Latitude in WGS84.
 
         Returns:
-            List[Dict[str, Any]]: Results sorted by similarity.
+            Dict[str, Any]: Payload with seed chip, results, and thumbnails.
         """
-        logger.info(f"[Handlers] similarity_by_text text='{text}'")
-        t0 = time.perf_counter()
+        logger.info(f"[similarity_by_point] BEGIN lon={lon}, lat={lat}")
+        t_start = time.perf_counter()
 
-        # Resolve text → geocode via OSM
-        poi = await self._geocode_text(text)
-        lon = poi["lon"]
-        lat = poi["lat"]
-
-        logger.info(f"[Handlers] OSM resolved to lon={lon}, lat={lat}")
-
-        # Run similarity via spatial lookup
-        results = await self.similarity_by_point(lon, lat)
-
-        dt = time.perf_counter() - t0
-        logger.info(f"[Handlers] similarity_by_text completed (elapsed={dt:.3f}s)")
-
-        return results
-
-    # ------------------------------------------------------------------
-    # Point Similarity
-    # ------------------------------------------------------------------
-    async def similarity_by_point(self, lon: float, lat: float) -> List[Dict[str, Any]]:
-        """Run similarity search by point lookup + vector comparison.
-
-        Args:
-            lon (float): Longitude.
-            lat (float): Latitude.
-
-        Returns:
-            List[Dict[str, Any]]: Similar chips sorted by similarity.
-        """
-        logger.info(f"[Handlers] similarity_by_point lon={lon}, lat={lat}")
-        t0 = time.perf_counter()
-
+        # --- Step 1: spatial lookup ---
+        chip_lookup_start = time.perf_counter()
+        logger.info("[similarity_by_point] Performing spatial chip lookup...")
         chip = self.db.get_chip_by_point(lon, lat)
-        if not chip:
-            logger.warning("[Handlers] No chip found for given coordinates")
-            return []
+        chip_lookup_end = time.perf_counter()
 
-        seed_vec = chip["vec"]
-
-        # Run similarity search
-        results = self.db.get_similar_chips(seed_vec, limit=12)
-
-        dt = time.perf_counter() - t0
         logger.info(
-            f"[Handlers] similarity_by_point returned {len(results)} results "
-            f"(elapsed={dt:.3f}s)"
+            f"[similarity_by_point] Spatial lookup completed in "
+            f"{chip_lookup_end - chip_lookup_start:.3f}s"
         )
 
-        return results
+        if chip is None:
+            logger.warning(
+                f"[similarity_by_point] No chip found at ({lon}, {lat})"
+            )
+            return {"error": "No chip found at that location", "lon": lon, "lat": lat}
 
-    # ------------------------------------------------------------------
-    # Internal Helpers
-    # ------------------------------------------------------------------
-    async def _geocode_text(self, text: str) -> Dict[str, float]:
-        """Resolve natural language text using the OSM geocoding API.
+        seed_chip_id = chip["chips_id"]
+        seed_vec = chip["vec"]
 
-        Args:
-            text (str): Query text.
+        # --- Step 2: Similarity search ---
+        logger.info(
+            f"[similarity_by_point] Running vector similarity search for seed chip {seed_chip_id}"
+        )
+        sim_start = time.perf_counter()
+        matches = self.db.get_similar_chips(seed_vec, limit=8)
+        sim_end = time.perf_counter()
 
-        Returns:
-            Dict[str, float]: Coordinates dictionary with keys 'lon' and 'lat'.
-        """
-        import httpx
+        logger.info(
+            f"[similarity_by_point] Vector similarity search returned {len(matches)} results "
+            f"in {sim_end - sim_start:.3f}s"
+        )
 
-        logger.info(f"[Handlers] Geocoding text '{text}'")
+        # --- Step 3: Build response payload ---
+        results = []
+        for m in matches:
+            chip_id = m["chips_id"]
+            thumb_url = f"{THUMB_BASE}/{chip_id}_native.jpeg"
 
-        url = "https://nominatim.openstreetmap.org/search"
-        params = {
-            "q": text,
-            "format": "json",
-            "limit": 1,
+            logger.debug(
+                f"[similarity_by_point] Adding match chip {chip_id} with thumbnail {thumb_url}"
+            )
+
+            results.append(
+                {
+                    **m,
+                    "thumbnail": thumb_url,
+                }
+            )
+
+        total = time.perf_counter() - t_start
+        logger.info(
+            f"[similarity_by_point] END for seed chip {seed_chip_id} "
+            f"(total latency={total:.3f}s)"
+        )
+
+        return {
+            "seed_chip": seed_chip_id,
+            "results": results,
         }
 
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(url, params=params)
+    # ----------------------------------------------------------------------
+    # Similarity by TEXT (full pipeline)
+    # ----------------------------------------------------------------------
+    async def similarity_by_text(self, query: str) -> Dict[str, Any]:
+        """Run a full similarity workflow from natural-language text.
 
-        resp.raise_for_status()
-        data = resp.json()
+        Steps:
+            1. Resolve text → lat/lon with OSM
+            2. Run similarity_by_point(lon, lat)
 
-        if not data:
-            raise ValueError(f"No geocoding results for text: {text}")
+        Args:
+            query (str): User text query such as "marina", "airport", "parking lot".
 
-        top = data[0]
-        lon = float(top["lon"])
-        lat = float(top["lat"])
+        Returns:
+            Dict[str, Any]: Combined result containing OSM POI + similarity matches.
+        """
+        logger.info(f"[similarity_by_text] BEGIN query='{query}'")
+        t_start = time.perf_counter()
 
-        logger.info(f"[Handlers] Geocoding '{text}' resolved to lon={lon}, lat={lat}")
+        # --- Step 1: OSM Geocoding ---
+        logger.info(
+            f"[similarity_by_text] Resolving query '{query}' via OSM/fallback logic..."
+        )
+        osm_start = time.perf_counter()
+        poi = await self.osm.geocode(query)
+        osm_end = time.perf_counter()
 
-        return {"lon": lon, "lat": lat}
+        logger.info(
+            f"[similarity_by_text] OSM resolved query '{query}' in "
+            f"{osm_end - osm_start:.3f}s → result: {poi}"
+        )
+
+        if poi is None:
+            logger.warning(
+                f"[similarity_by_text] No OSM resolution for query='{query}'"
+            )
+            return {"error": "No OSM result for query", "query": query}
+
+        # --- Step 2: Similarity by point ---
+        logger.info(
+            f"[similarity_by_text] Running similarity_by_point({poi['lon']}, {poi['lat']})"
+        )
+        sim_start = time.perf_counter()
+        similarity_result = await self.similarity_by_point(poi["lon"], poi["lat"])
+        sim_end = time.perf_counter()
+
+        logger.info(
+            f"[similarity_by_text] similarity_by_point completed in "
+            f"{sim_end - sim_start:.3f}s"
+        )
+
+        total = time.perf_counter() - t_start
+        logger.info(
+            f"[similarity_by_text] END query='{query}' "
+            f"(total pipeline={total:.3f}s)"
+        )
+
+        return {
+            "query": query,
+            "poi": poi,
+            **similarity_result,
+        }
