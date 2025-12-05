@@ -57,19 +57,8 @@ LGND provides the DuckDB file `embeddings.db`, which contains:
 - Chip IDs
 - Metadata used for similarity search
 
-### Download it from the LGND assignment source and place it here:
+### Download it from the LGND assignment source and place it in the root project folder
 
-```
-lgnd-similarity-search/backend/embeddings.db
-```
-
-Verify it exists:
-
-```bash
-ls
-# or
-dir
-```
 
 If `embeddings.db` is missing, the backend will not run.
 
@@ -138,8 +127,9 @@ ls
 
 ### Run the backend
 
+From project root :
 ```bash
-uvicorn server:app --reload --host 127.0.0.1 --port 8000
+uvicorn backend.mcp_server.server:app --reload --host 127.0.0.1 --port 8000
 ```
 
 Backend available at:
