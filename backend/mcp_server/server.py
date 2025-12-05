@@ -3,6 +3,7 @@
 import logging
 from fastapi import FastAPI, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+import httpx   # NEW: for weather API
 
 from .handlers import MCPHandlers
 
@@ -19,12 +20,12 @@ handlers = MCPHandlers(db_path="./embeddings.db")
 
 
 # ----------------------------------------------------------------------
-# CORS (unchanged)
+# CORS — FIXED: allow_credentials must be False when allow_origins=["*"]
 # ----------------------------------------------------------------------
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=["*"],        # all origins allowed for demo
+    allow_credentials=False,    # MUST be False when using "*"
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -45,11 +46,7 @@ async def startup_event():
 # ----------------------------------------------------------------------
 @app.get("/health")
 async def health() -> dict:
-    """Return a simple health check response.
-
-    Returns:
-        A dictionary indicating that the server is healthy.
-    """
+    """Return a simple health check response."""
     logger.debug("[Server] Health check requested.")
     return {"ok": True}
 
@@ -62,14 +59,7 @@ async def similarity_text(
     request: Request,
     q: str = Query(..., description="Natural-language query, e.g. 'coastal marina'."),
 ) -> dict:
-    """Run a similarity search based on a text query.
-
-    Args:
-        q: Natural-language query describing the target area or feature.
-
-    Returns:
-        A JSON-serializable dictionary containing similarity search results.
-    """
+    """Run a similarity search based on a text query."""
     logger.info(f"[Server] /similarity/text → query='{q}'")
     return await handlers.similarity_by_text(q)
 
@@ -80,14 +70,34 @@ async def similarity_point(
     lon: float = Query(..., description="Longitude in WGS84."),
     lat: float = Query(..., description="Latitude in WGS84."),
 ) -> dict:
-    """Run a similarity search anchored at a longitude/latitude point.
-
-    Args:
-        lon: Longitude in WGS84.
-        lat: Latitude in WGS84.
-
-    Returns:
-        A JSON-serializable dictionary containing similarity search results.
-    """
+    """Run a similarity search anchored at a longitude/latitude point."""
     logger.info(f"[Server] /similarity/point → lon={lon}, lat={lat}")
     return await handlers.similarity_by_point(lon, lat)
+
+
+# ----------------------------------------------------------------------
+# WEATHER ENDPOINT 🌤️
+# ----------------------------------------------------------------------
+@app.get("/weather")
+async def get_weather(
+    lat: float = Query(..., description="Latitude in WGS84."),
+    lon: float = Query(..., description="Longitude in WGS84."),
+) -> dict:
+    """
+    Fetch current weather for the given coordinates using Open-Meteo API.
+    """
+    logger.info(f"[Server] /weather → lat={lat}, lon={lon}")
+
+    url = (
+        "https://api.open-meteo.com/v1/forecast"
+        f"?latitude={lat}&longitude={lon}&current_weather=true"
+    )
+
+    async with httpx.AsyncClient() as client:
+        response = await client.get(url)
+
+    if response.status_code != 200:
+        logger.error(f"[Weather] API error: {response.text}")
+        return {"error": "Weather service unavailable"}
+
+    return response.json()
