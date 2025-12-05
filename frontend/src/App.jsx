@@ -2,7 +2,7 @@ import { useState } from "react";
 import { MapContainer, TileLayer, Marker, Popup } from "react-leaflet";
 import "leaflet/dist/leaflet.css";
 
-import ChatInput from "./components/ChatInput";
+import SearchInput from "./components/SearchInput";
 import Weather from "./components/Weather";
 
 // -----------------------------------------------------------
@@ -74,7 +74,7 @@ export default function App() {
       >
         <h2>Image Search</h2>
 
-        <ChatInput
+        <SearchInput
           onSend={(msg) => {
             setQuery(msg);
             search(msg);   // 🔥 call search directly with the message

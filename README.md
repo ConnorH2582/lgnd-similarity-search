@@ -36,7 +36,7 @@ lgnd-similarity-search/
 │ ├── src/
 │ │ ├── App.jsx
 │ │ ├── components/
-│ │ │ ├── ChatInput.jsx
+│ │ │ ├── SearchInput.jsx
 │ │ │ ├── Weather.jsx
 │ │ ├── index.css
 │ │ ├── app.css

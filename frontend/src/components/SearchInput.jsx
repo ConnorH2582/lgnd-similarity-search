@@ -1,6 +1,6 @@
 import { useState } from "react";
 
-export default function ChatInput({ onSend }) {
+export default function SearchInput({ onSend }) {
   const [msg, setMsg] = useState("");
 
   const send = () => {
