@@ -1,119 +1,192 @@
 import { useState } from "react";
-import axios from "axios";
-import "./App.css";
+import { MapContainer, TileLayer, Marker, Popup } from "react-leaflet";
+import "leaflet/dist/leaflet.css";
 
-/**
- * LGND Similarity Search Frontend
- *
- * - Matches original UI/UX (alignment, disabled button, grid layout)
- * - Adds lightweight frontend logging
- * - Safely handles backend response shape
- * - Prevents .map errors
- */
+import ChatInput from "./components/ChatInput";
+import Weather from "./components/Weather";
+
+// -----------------------------------------------------------
+// 🔥 LEAFLET MARKER ICON FIX (Vite + React-Leaflet)
+// -----------------------------------------------------------
+import L from "leaflet";
+import iconRetinaUrl from "leaflet/dist/images/marker-icon-2x.png";
+import iconUrl from "leaflet/dist/images/marker-icon.png";
+import shadowUrl from "leaflet/dist/images/marker-shadow.png";
+
+// Explicitly define the default marker icon
+const DefaultIcon = L.icon({
+  iconUrl,
+  iconRetinaUrl,
+  shadowUrl,
+  iconSize: [25, 41],
+  iconAnchor: [12, 41],
+  popupAnchor: [1, -34],
+  shadowSize: [41, 41],
+});
+
+// Apply globally
+L.Marker.prototype.options.icon = DefaultIcon;
+
+// -----------------------------------------------------------
+// MAIN APP COMPONENT
+// -----------------------------------------------------------
 export default function App() {
   const [query, setQuery] = useState("");
-  const [result, setResult] = useState(null);   // matches original shape
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
+  const [results, setResults] = useState([]);
 
-  async function handleSearch(e) {
-    if (e?.preventDefault) e.preventDefault();
-    if (!query.trim()) return;
+  // NEW: Search function now takes the query directly (fixes first-click bug)
+  const search = async (inputQuery) => {
+    const q = inputQuery ?? query;
+    if (!q.trim()) return;
 
-    console.log("[Frontend] Searching for:", query);
+    // Clear existing results (forces re-render)
+    setResults([]);
 
-    setLoading(true);
-    setError("");
-    setResult(null);
+    const res = await fetch(
+      `http://localhost:8000/similarity/text?q=${encodeURIComponent(q)}`
+    );
+    const data = await res.json();
 
-    try {
-      const res = await axios.get("http://127.0.0.1:8000/similarity/text", {
-        params: { q: query },
-      });
-
-      console.log("[Frontend] Raw backend response:", res.data);
-
-      // SAFETY: ensure results array always exists
-      const safe = {
-        ...res.data,
-        results: Array.isArray(res.data.results) ? res.data.results : [],
-      };
-
-      setResult(safe);
-      console.log("[Frontend] Parsed results:", safe);
-    } catch (err) {
-      console.error("[Frontend] Search error:", err);
-      setError("Something went wrong contacting the backend.");
-    } finally {
-      setLoading(false);
-    }
-  }
+    // Ensure fresh identity for React
+    setResults([...data.results]);
+  };
 
   return (
-    <div style={{ maxWidth: 800, margin: "0 auto", padding: 24 }}>
-      <h1>LGND SF Imagery Search</h1>
+    <div
+      style={{
+        display: "flex",
+        height: "100vh",
+        position: "relative",
+        overflow: "hidden",
+      }}
+    >
+      {/* LEFT SIDEBAR */}
+      <div
+        style={{
+          width: "350px",
+          padding: "20px",
+          background: "#fafafa",
+          borderRight: "1px solid #ddd",
+          display: "flex",
+          flexDirection: "column",
+          zIndex: 10,
+        }}
+      >
+        <h2>Image Search</h2>
 
-      {/* Original layout restored */}
-      <form onSubmit={handleSearch} style={{ marginBottom: 16 }}>
-        <input
-          style={{ width: "70%", padding: 8, marginRight: 8 }}
-          placeholder='Try "coastal marina" or "airport"'
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          disabled={loading}
+        <ChatInput
+          onSend={(msg) => {
+            setQuery(msg);
+            search(msg);   // 🔥 call search directly with the message
+          }}
         />
-        <button type="submit" disabled={loading}>
-          {loading ? "Searching..." : "Search"}
-        </button>
-      </form>
 
-      {error && <p style={{ color: "red" }}>{error}</p>}
+        <h3 style={{ marginTop: "20px" }}>Results ({results.length})</h3>
 
-      {/* Render results in original grid */}
-      {result && result.results && (
-        <div>
-          <h2>Results</h2>
+        <div
+          style={{
+            overflowY: "auto",
+            flexGrow: 1,
+            border: "1px solid #eee",
+            borderRadius: "6px",
+            padding: "10px",
+            background: "white",
+          }}
+        >
+          {results.length === 0 && <p>No results yet.</p>}
 
-          {result.poi && (
-            <p>
-              OSM anchor: <strong>{result.poi.name}</strong>
-            </p>
-          )}
+          {results.map((r) => (
+            <div
+              key={r.chips_id}
+              style={{
+                marginBottom: "14px",
+                padding: "10px",
+                border: "1px solid #ddd",
+                borderRadius: "6px",
+                background: "white",
+              }}
+            >
+              <strong>{r.chips_id}</strong>
+              <br />
+              <small>
+                similarity: {r.similarity}
+                <br />
+                lat: {r.lat}, lon: {r.lon}
+              </small>
 
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(auto-fit, 150px)",
-              gap: 12,
-            }}
-          >
-            {result.results.map((chip) => (
-              <div key={chip.chips_id} style={{ fontSize: 12 }}>
+              {r.thumbnail && (
                 <img
-                  src={`https://lgnd-fullstack-takehome-thumbnails.s3.us-east-2.amazonaws.com/${chip.chips_id}_256.jpeg`}
-                  alt={chip.chips_id}
+                  src={r.thumbnail}
+                  onError={(e) => (e.currentTarget.src = "/fallback.jpg")}
+                  alt="thumb"
                   style={{
                     width: "100%",
-                    height: 100,
-                    objectFit: "cover",
-                    borderRadius: 4,
+                    borderRadius: "6px",
+                    marginTop: "8px",
+                    border: "1px solid #ccc",
                   }}
-                  onLoad={() =>
-                    console.log(`[Frontend] Loaded thumbnail for ${chip.chips_id}`)
-                  }
-                  onError={() =>
-                    console.error(
-                      `[Frontend] Failed to load thumbnail for ${chip.chips_id}`
-                    )
-                  }
                 />
-
-                <div>sim: {chip.similarity.toFixed(3)}</div>
-              </div>
-            ))}
-          </div>
+              )}
+            </div>
+          ))}
         </div>
-      )}
+      </div>
+
+      {/* MAP AREA */}
+      <div style={{ flexGrow: 1, zIndex: 1 }}>
+        <MapContainer
+          center={[37.7749, -122.4194]}
+          zoom={10}
+          style={{
+            height: "100%",
+            width: "100%",
+            zIndex: 1,
+          }}
+        >
+          <TileLayer
+            attribution="&copy; OpenStreetMap contributors"
+            url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+          />
+
+          {/* SAFE MARKER RENDERING */}
+          {results
+            .filter(
+              (r) =>
+                typeof r.lat === "number" &&
+                typeof r.lon === "number" &&
+                !isNaN(r.lat) &&
+                !isNaN(r.lon)
+            )
+            .map((r) => (
+              <Marker key={r.chips_id} position={[r.lat, r.lon]}>
+                <Popup>
+                  <strong>{r.chips_id}</strong>
+                  <br />
+                  similarity: {r.similarity}
+                  <br />
+                  <br />
+
+                  {r.thumbnail && (
+                    <img
+                      src={r.thumbnail}
+                      onError={(e) => (e.currentTarget.src = "/fallback.jpg")}
+                      alt="thumb"
+                      style={{
+                        width: "150px",
+                        borderRadius: "4px",
+                        border: "1px solid #ccc",
+                      }}
+                    />
+                  )}
+
+                  <br />
+                  <br />
+                  <Weather lat={r.lat} lon={r.lon} />
+                </Popup>
+              </Marker>
+            ))}
+        </MapContainer>
+      </div>
     </div>
   );
 }
